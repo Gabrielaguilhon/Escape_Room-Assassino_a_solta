@@ -1,9 +1,13 @@
 #include <avr/io.h>
+#include <stdlib.h> // Necessário para a função itoa() (converte inteiro para string)
+#include <util/delay.h> // Apenas para segurar a velocidade do print no monitor
+
 // macros de bit
 #define set_bit(reg, bit) ((reg) |= (1 << (bit)))
 #define clr_bit(reg, bit) ((reg) &= ~(1 << (bit)))
 #define cpl_bit(reg, bit) ((reg) ^= (1 << (bit)))
 #define tst_bit(reg, bit) ((reg) & (1 << (bit)))
+
 uint16_t meu_analogRead(uint8_t canal) {
 ADMUX = (ADMUX & 0xF0) | canal; // escolhe A0..A5
 set_bit(ADCSRA, ADSC);
@@ -32,6 +36,7 @@ clr_bit(PORTB, PB3);
 }
   
 void setup() {
+  Serial.begin(9600);
   set_bit(DDRB, PB3);
   set_bit(DDRB, PB5);
   ADMUX = (1 << REFS0);
@@ -43,14 +48,24 @@ void setup() {
   // 16 MHz/128 = 125 kHz
 }
 void loop() {
-uint16_t valor = meu_analogRead(0); // A0
-if (valor > 512) {
-  set_bit(PORTB, PB5);
-  meu_tone(440);
-  delay(200);
-  meu_noTone();
-  delay(800);
-} else {
-  clr_bit(PORTB, PB5);
-  }
+  uint16_t valor = meu_analogRead(0); // A0
+  
+  if (valor > 512) {
+    set_bit(PORTB, PB5);
+    meu_tone(440);
+    delay(200);
+    meu_noTone();
+    delay(800);
+    Serial.println("Sinal Radio: ");
+  	Serial.println(valor); // Envia o número lido
+    Serial.println("Radio sintonizado");
+
+  } else {
+    clr_bit(PORTB, PB5);
+    Serial.println("Voce ainda nao conseguiu sintonizar o radio, esta perdendo tempo...");
+
+    }
+    
+    _delay_ms(250); // Delay temporário apenas para não travar seu monitor serial
+  
 }
