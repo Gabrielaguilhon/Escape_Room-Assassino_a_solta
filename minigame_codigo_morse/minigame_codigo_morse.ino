@@ -1,6 +1,7 @@
 #include <avr/io.h>
+#include <avr/interrupt.h> 
 
-// Macros para operações de bit exigidas na disciplina
+// Macros de bit
 #define set_bit(reg, bit) ((reg) |= (1 << (bit)))
 #define clr_bit(reg, bit) ((reg) &= ~(1 << (bit)))
 #define cpl_bit(reg, bit) ((reg) ^= (1 << (bit)))
@@ -8,16 +9,30 @@
 
 String letraAtual = "";
 String senhaDigitada = "";
-// A senha correta: FACA (com espaço no final de cada letra)
-String senhaCorreta = "..-. .- -.-. .- ";
+String senhaCorreta = "..-. .- -.-. .- "; // FACA
 
-// Variáveis para a máquina de estados não bloqueante
+// Maquina de estados
 uint32_t tempoUltimaLeitura = 0;
 const uint32_t tempoDebounce = 50; 
 uint8_t estadoAnterior = 0; 
-uint8_t estadoMaximo = 0; // Guarda a combinação máxima pressionada
+uint8_t estadoMaximo = 0; 
 
-// Função de leitura corrigida (Leitura Dupla contra Ghosting do ADC)
+volatile uint32_t ms = 0; 
+
+ISR(TIMER1_COMPA_vect) {
+  ms++;
+}
+
+// Retorna os milissegundos
+uint32_t meu_millis() {
+  uint32_t tempo;
+  cli();       
+  tempo = ms;
+  sei();       
+  return tempo;
+}
+
+// Leitura do ADC com dummy read pra evitar ghosting
 uint16_t ler_adc(uint8_t canal) {
   ADMUX = (ADMUX & 0xF0) | canal; 
   
@@ -33,25 +48,35 @@ uint16_t ler_adc(uint8_t canal) {
 void setup() {
   Serial.begin(9600);
   
-  // Configurar A1 (PC1) - Fio Vermelho (Botão Ponto)
+  cli(); 
+  
+  // Timer1 para 1ms (Modo CTC)
+  TCCR1A = 0;
+  TCCR1B = (1 << WGM12) | (1 << CS11) | (1 << CS10); // Prescaler 64
+  OCR1A = 249;                                       
+  TIMSK1 = (1 << OCIE1A);                            
+  
+  // A1 (PC1) - Botao Ponto
   clr_bit(DDRC, PC1);  
-  set_bit(PORTC, PC1); // Liga pull-up interno
+  set_bit(PORTC, PC1); 
   
-  // Configurar A2 (PC2) - Fio Amarelo (Botão Traço)
+  // A2 (PC2) - Botao Traco
   clr_bit(DDRC, PC2);  
-  set_bit(PORTC, PC2); // Liga pull-up interno
+  set_bit(PORTC, PC2); 
   
-  // Configuração do ADC (Referência 5V e Prescaler 128)
+  // Config ADC
   ADMUX = (1 << REFS0);
   ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
   
+  sei(); 
+  
   Serial.println("Minigame Codigo Morse iniciado");
   Serial.println("Digite a arma do crime!");
-  delay(200); // Atraso de estabilização
+  delay(200); 
 }
 
 void loop() {
-  uint32_t tempoAtual = millis(); 
+  uint32_t tempoAtual = meu_millis(); 
   
   if (tempoAtual - tempoUltimaLeitura >= tempoDebounce) {
     tempoUltimaLeitura = tempoAtual;
@@ -65,7 +90,6 @@ void loop() {
     else if (btnPonto) estadoAtual = 1;
     else if (btnTraco) estadoAtual = 2;
 
-    // Atualiza o pico da jogada enquanto os botões estão sendo pressionados
     if (estadoAtual != 0) {
       if (estadoAtual == 3) {
         estadoMaximo = 3; 
@@ -75,25 +99,23 @@ void loop() {
       }
     }
 
-    // AÇÃO NA BORDA DE DESCIDA: Dispara quando todos os botões forem soltos
+    // Borda de descida
     if (estadoAtual == 0 && estadoAnterior != 0) {
       
-      if (estadoMaximo == 3) { // Soltou após apertar os dois botões
+      if (estadoMaximo == 3) { 
          
-         // 1. Se tem algo digitado, confirma a LETRA
          if (letraAtual != "") {
              Serial.println();
              Serial.print("Letra confirmada: ");
              Serial.println(letraAtual);
              
-             senhaDigitada += letraAtual + " "; // Adiciona na palavra com espaço
+             senhaDigitada += letraAtual + " "; 
              
              Serial.print("Palavra atual (em Morse): ");
              Serial.println(senhaDigitada);
              
-             letraAtual = ""; // Zera a letra atual para a próxima
+             letraAtual = ""; 
          }
-         // 2. Se a letra atual está vazia (Confirmação Dupla), avalia a PALAVRA inteira
          else if (senhaDigitada != "") {
              Serial.println();
              Serial.println(">>> VERIFICANDO SENHA <<<");
@@ -102,25 +124,23 @@ void loop() {
                 Serial.println("===============================");
                 Serial.println("\nMini-game concluido!\nDica desbloqueada: Foi encontrado um FIO DE CABELO RUIVO na cena do crime!\n");
                 Serial.println("===============================");
-                
-                // Aqui você pode mudar a variável de fase para o próximo puzzle
              } 
              else {
                 Serial.println("--- ARMA ERRADA! Tente novamente. ---");
-                senhaDigitada = ""; // Apaga toda a palavra para tentar do zero
+                senhaDigitada = ""; 
              }
          }
       } 
-      else if (estadoMaximo == 1) { // Soltou após apertar só o Ponto
+      else if (estadoMaximo == 1) { 
          letraAtual += ".";
          Serial.print(".");
       } 
-      else if (estadoMaximo == 2) { // Soltou após apertar só o Traço
+      else if (estadoMaximo == 2) { 
          letraAtual += "-";
          Serial.print("-");
       }
       
-      estadoMaximo = 0; // Zera a memória para a próxima jogada
+      estadoMaximo = 0; 
     }
     
     estadoAnterior = estadoAtual;
