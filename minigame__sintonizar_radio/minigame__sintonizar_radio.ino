@@ -1,7 +1,7 @@
 #include <avr/io.h>
 #include <stdlib.h> // Necessário para a função itoa() (converte inteiro para string)
 #include <util/delay.h> // Apenas para segurar a velocidade do print no monitor
-
+ 
 // macros de bit
 #define set_bit(reg, bit) ((reg) |= (1 << (bit)))
 #define clr_bit(reg, bit) ((reg) &= ~(1 << (bit)))
@@ -15,7 +15,8 @@
  
 void sintoniza_radio(uint16_t valor) {
   if (valor > LIMIAR_ALTO || valor < LIMIAR_BAIXO) {
-    meu_tone(440);
+    uint16_t frequencia_chiado = 500 + (rand() % 2000); 
+    meu_tone(frequencia_chiado);
     Serial.println("Voce ainda nao conseguiu sintonizar o radio, esta perdendo tempo...");
   } else{
        //radio_sintonizado = 1;
