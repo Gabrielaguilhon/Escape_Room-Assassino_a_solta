@@ -1,31 +1,53 @@
 #include <avr/io.h>
 #include <stdlib.h> // Necessário para a função itoa() (converte inteiro para string)
 #include <util/delay.h> // Apenas para segurar a velocidade do print no monitor
- 
+#include <LiquidCrystal_I2C.h> // Biblioteca para o LCD COM I2C 
+
 // macros de bit
 #define set_bit(reg, bit) ((reg) |= (1 << (bit)))
 #define clr_bit(reg, bit) ((reg) &= ~(1 << (bit)))
 #define cpl_bit(reg, bit) ((reg) ^= (1 << (bit)))
 #define tst_bit(reg, bit) ((reg) & (1 << (bit)))
- 
+
+LiquidCrystal_I2C lcd(0x27, 16, 2); // registrador, tamanho do lcd
+
+
 #define LIMIAR_ALTO 700 // acima disso: ruídos
 #define LIMIAR_BAIXO 600 // abaixo disso: ruídos
  
-//uint8_t radio_sintonizado = 0; //começa não sintonizado
+int radio_sintonizado = 0; //começa não sintonizado
+
+
  
 void sintoniza_radio(uint16_t valor) {
   if (valor > LIMIAR_ALTO || valor < LIMIAR_BAIXO) {
+    radio_sintonizado = 0;
     uint16_t frequencia_chiado = 500 + (rand() % 2000); 
     meu_tone(frequencia_chiado);
     Serial.println("Voce ainda nao conseguiu sintonizar o radio, esta perdendo tempo...");
+    lcd.noBacklight();
+    
   } else{
-       //radio_sintonizado = 1;
+       radio_sintonizado = 1;
        meu_noTone();
        Serial.println("Sinal Radio: ");
-       //Serial.println(valor); // Envia o número lido
        Serial.println("Radio sintonizado");
+       lcd.backlight();
+       lcd.setCursor(0,0);
+      lcd.print("Esta ligado");
+      Serial.println(radio_sintonizado);
     }
   }
+  
+//void tela_contador(){
+  //if (radio_sintonizado == 1){
+    
+
+ // } else{
+    //lcd.noBacklight();
+ // }
+  //se não sintonizar, não faz nada
+//}
  
 uint16_t meu_analogRead(uint8_t canal) {
   ADMUX = (ADMUX & 0xF0) | canal; // escolhe A0..A5
@@ -63,7 +85,9 @@ void setup() {
   ADCSRA = (1 << ADEN)
   | (1 << ADPS2) | (1 << ADPS1) // divisor 128:
   | (1 << ADPS0);
-  // 16 MHz/128 = 125 kHz
+  // 16 MHz/128 = 125 kHzlcd.init();
+  lcd.init();
+
 }
  
 void loop() {
