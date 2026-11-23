@@ -64,6 +64,63 @@ uint32_t meu_millis() {
     return tempo;
 }
 
+void meu_tone(uint16_t frequencia) {
+  set_bit(DDRD, PD6);
+  // tone(11, frequencia), frequencia >= 245 Hz
+  // f = 16 MHz / (2 * 128 * (OCR2A + 1))
+  OCR0A = 125000 / frequencia- 1;
+  // modo CTC, D11 (OC2A) inverte a cada volta
+  TCCR0A = (1 << COM0A0) | (1 << WGM01);
+  TCCR0B = (1 << CS01) | (1 << CS00); // N = 128: liga
+}
+
+void meu_noTone() {
+  // noTone(11)
+  TCCR0B = 0;
+  // para o timer
+  TCCR0A = 0;
+  // D11 volta a ser pino comum
+  clr_bit(PORTD, PD6);
+}
+
+void meu_delay(uint32_t tempo_espera) {
+    uint32_t inicio = meu_millis();
+    while (meu_millis() - inicio < tempo_espera) {
+        // Fica preso aqui até o tempo passar, usando o seu Timer 1
+    }
+}
+
+
+void som_facada() {
+  uint32_t tempo = meu_millis();
+  while (tempo > 0) {
+    for (int i = 0; i < 40; i++) {
+          // Mistura frequências médias e graves aleatórias muito rápido
+          meu_tone(random(120, 950)); 
+          meu_delay(1);
+        }
+    
+        // 2. A penetração / peso do golpe (cai rapidamente para o grave abafado)
+        for (int freq = 220; freq >= 45; freq -= 15) {
+          meu_tone(freq + random(-20, 20)); // Adiciona "sujeira" ao som
+          meu_delay(4);
+        }
+    
+        meu_noTone();   // Corta o som imediatamente
+        meu_delay(550); // Silêncio bem marcado entre um golpe e outro
+      }
+}
+void som_sirene() {
+    for(int i = 0; i < 5; i++) {
+        meu_tone(635); 
+        meu_delay(400); // Usando o delay customizado
+        meu_tone(912); 
+        meu_delay(400); // Usando o delay customizado
+    }
+    meu_noTone();
+}
+
+
 // Função que faz o trabalho da biblioteca Keypad varrendo as teclas
 char lerTeclado() {
   for (int linha = 0; linha < 4; linha++) {
@@ -106,10 +163,10 @@ void guardaSenha(char tecla){
       // strcmp compara dois textos. Se o resultado for 0, eles são iguais.
       if (strcmp(senha_digitada, senha_real)==0) {
         Serial.println("ACERTOU! Sirene tocando...");
-        // Adicionar o buzzer neste ponto (função meuTone() já criada em outro momento)
+        som_sirene();
       } else {
         Serial.println("ERROU! Barulho de facada...");
-        // Adicionar aqui a função de penalidade de tempo e som de derrota (função noTone())
+        som_facada();
       }
       
       // RESET para a próxima tentativa: zera o índice e apaga o vetor
@@ -150,9 +207,6 @@ void discaNumero(char tecla){
     // 1. Lógica de confirmar discagem (tecla #)
     if (tecla == '#') {
       discagemRealizada[indiceDiscagem] = '\0'; 
-      
-      //Serial.print("Jogador discou: ");
-      //Serial.println(discagemRealizada);
       
       if (strcmp(discagemRealizada, discagem)==0) {
         Serial.println("Você foi atendido! Pode indicar o assassino.");
