@@ -1,9 +1,24 @@
 #include <SoftwareWire.h>
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <stdlib.h>
+
+// Macros obrigatórias para manipulação de bits
+#define set_bit(reg, bit) ((reg) |= (1 << (bit)))
+#define clr_bit(reg, bit) ((reg) &= ~(1 << (bit)))
+#define cpl_bit(reg, bit) ((reg) ^= (1 << (bit)))
+#define tst_bit(reg, bit) ((reg) & (1 << (bit)))
 
 // 1. Configuração do I2C em pinos digitais[cite: 11]
 const int SDA_PIN = 8;
 const int SCL_PIN = 9;
 SoftwareWire softWire(SDA_PIN, SCL_PIN);
+
+// Configuração da variável de tempo
+volatile uint32_t ms = 0;
+
+uint32_t ultimo_toque = 0;
+const uint32_t TEMPO_DEBOUNCE = 200; // 200ms de intervalo mínimo entre leituras
 
 // Endereço I2C do módulo preto (costuma ser 0x27 ou 0x20)
 const uint8_t ENDERECO_TECLADO = 0x27; 
@@ -29,13 +44,25 @@ char discagemRealizada[4] = "";
 int indiceDiscagem = 0;
 bool policiaAtendeu = false;
 
-//Senha solicitada
-char senha_real[] = "1661";
-// Vetor para guardar até 19 dígitos + 1 caractere nulo de final de texto
-char senha_digitada[20] = ""; 
+//Senha solicitada, indica "AnaB"
+char senha_real[] = "166111";
+// Vetor para guardar até 6 dígitos + 1 caractere nulo de final de texto
+char senha_digitada[7] = ""; 
 int indiceSenha = 0;
 
+// Conta o tempo em milissegundos
+ISR(TIMER1_COMPA_vect) {
+    ms++;
+}
 
+// Função equivalente a millis()
+uint32_t meu_millis() {
+    uint32_t tempo;
+    cli();
+    tempo = ms;
+    sei();
+    return tempo;
+}
 
 // Função que faz o trabalho da biblioteca Keypad varrendo as teclas
 char lerTeclado() {
@@ -101,7 +128,7 @@ void guardaSenha(char tecla){
     // 3. Lógica de GUARDAR NÚMEROS (0 a 9)
     else {
       // Verifica se ainda tem espaço no vetor (tamanho máximo 19)
-      if (indiceSenha < 19) {
+      if (indiceSenha < 6) {
         senha_digitada[indiceSenha] = tecla; // Salva o número na posição atual
         indiceSenha++;                       // Avança para a próxima posição vazia
         senha_digitada[indiceSenha] = '\0';  // Já fecha o texto provisoriamente
@@ -112,7 +139,6 @@ void guardaSenha(char tecla){
         Serial.println("Limite maximo de caracteres atingido!");
       }
     }
-    delay(200);
   }
 }
 
@@ -125,8 +151,8 @@ void discaNumero(char tecla){
     if (tecla == '#') {
       discagemRealizada[indiceDiscagem] = '\0'; 
       
-      Serial.print("Jogador discou: ");
-      Serial.println(discagemRealizada);
+      //Serial.print("Jogador discou: ");
+      //Serial.println(discagemRealizada);
       
       if (strcmp(discagemRealizada, discagem)==0) {
         Serial.println("Você foi atendido! Pode indicar o assassino.");
@@ -164,7 +190,6 @@ void discaNumero(char tecla){
         Serial.println("Limite maximo de caracteres atingido!");
       }
     }
-    delay(200);
   }
 }
 void setup() {
@@ -172,19 +197,32 @@ void setup() {
   
   // Inicia o I2C nos pinos digitais para o teclado
   softWire.begin();
+
+  // Configuração do Timer1 para contar a cada 1 ms sem bloquear o código
+  cli(); 
+  TCCR1A = 0; 
+  TCCR1B = (1 << WGM12) | (1 << CS11) | (1 << CS10); 
+  OCR1A = 249; 
+  TIMSK1 = (1 << OCIE1A); 
+  sei();
   
   Serial.println("Teclado via SoftwareWire iniciado!");
 }
 
 void loop() {
   char tecla = lerTeclado();
-  // O loop executa uma máquina de estados simples
-  if (policiaAtendeu == false) {
-    // Fase 1: O jogador ainda precisa discar 190
-    discaNumero(tecla); 
-  } else {
-    // Fase 2: O 190 já foi discado com sucesso, agora é o suspeito
-    guardaSenha(tecla); 
+  // Só entra no if se uma tecla foi pressionada E já passou o tempo do debounce
+  if (tecla != '\0' && (meu_millis() - ultimo_toque >= TEMPO_DEBOUNCE)) {
+    
+    // Atualiza o rastreador de tempo
+    ultimo_toque = meu_millis(); 
+    
+    // Executa a máquina de estados
+    if (policiaAtendeu == false) {
+      discaNumero(tecla); 
+    } else {
+      guardaSenha(tecla); 
+    }
   }
 
 }
