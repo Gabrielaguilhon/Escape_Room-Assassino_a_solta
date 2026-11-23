@@ -21,11 +21,21 @@ char mapaTeclas[4][3] = {
 uint8_t bitsLinhas[4] = {0, 1, 2, 4};
 // Colunas (3 fios da direita do teclado): P5, P6, P7
 uint8_t bitsColunas[3] = {5, 6, 7};
+
+//Discagem inicial a ser feita
+char discagem[] = "190";
+//Vetor para guardar até 3 digitos + 1 caractere nulo de final de texto
+char discagemRealizada[4] = "";
+int indiceDiscagem = 0;
+bool policiaAtendeu = false;
+
 //Senha solicitada
 char senha_real[] = "1661";
 // Vetor para guardar até 19 dígitos + 1 caractere nulo de final de texto
 char senha_digitada[20] = ""; 
-int indice = 0;
+int indiceSenha = 0;
+
+
 
 // Função que faz o trabalho da biblioteca Keypad varrendo as teclas
 char lerTeclado() {
@@ -60,7 +70,7 @@ void guardaSenha(char tecla){
     
     // 1. Lógica de CONFIRMAR a senha (tecla #)
     if (tecla == '#') {
-      senha_digitada[indice] = '\0'; // Fecha o texto para o C/C++ entender que acabou
+      senha_digitada[indiceSenha] = '\0'; // Fecha o texto para o C/C++ entender que acabou
       
       Serial.print("Jogador tentou o suspeito: ");
       Serial.println(senha_digitada);
@@ -76,25 +86,25 @@ void guardaSenha(char tecla){
       }
       
       // RESET para a próxima tentativa: zera o índice e apaga o vetor
-      indice = 0;
+      indiceSenha = 0;
       senha_digitada[0] = '\0';
       
     } 
     // 2. Lógica de APAGAR (tecla *)
     else if (tecla == '*') {
-      if (indice > 0) {
-        indice--; // Volta uma posição
-        senha_digitada[indice] = '\0'; // Apaga o caractere daquela posição
+      if (indiceSenha > 0) {
+        indiceSenha--; // Volta uma posição
+        senha_digitada[indiceSenha] = '\0'; // Apaga o caractere daquela posição
         Serial.println("Apagou o ultimo digito.");
       }
     } 
     // 3. Lógica de GUARDAR NÚMEROS (0 a 9)
     else {
       // Verifica se ainda tem espaço no vetor (tamanho máximo 19)
-      if (indice < 19) {
-        senha_digitada[indice] = tecla; // Salva o número na posição atual
-        indice++;                       // Avança para a próxima posição vazia
-        senha_digitada[indice] = '\0';  // Já fecha o texto provisoriamente
+      if (indiceSenha < 19) {
+        senha_digitada[indiceSenha] = tecla; // Salva o número na posição atual
+        indiceSenha++;                       // Avança para a próxima posição vazia
+        senha_digitada[indiceSenha] = '\0';  // Já fecha o texto provisoriamente
         
         Serial.print("Senha parcial: ");
         Serial.println(senha_digitada);
@@ -106,6 +116,57 @@ void guardaSenha(char tecla){
   }
 }
 
+void discaNumero(char tecla){
+   if (tecla != '\0') {
+    Serial.print("Tecla pressionada: ");
+    Serial.println(tecla);
+    
+    // 1. Lógica de confirmar discagem (tecla #)
+    if (tecla == '#') {
+      discagemRealizada[indiceDiscagem] = '\0'; 
+      
+      Serial.print("Jogador discou: ");
+      Serial.println(discagemRealizada);
+      
+      if (strcmp(discagemRealizada, discagem)==0) {
+        Serial.println("Você foi atendido! Pode indicar o assassino.");
+        
+        // MUDANÇA DE ESTADO: Avisa ao loop que o jogador passou de fase!
+        policiaAtendeu = true; 
+        
+      } else {
+        Serial.println("Sua discagem está inadequada! Repita, por favor!");
+      }
+      
+      // RESET para a próxima tentativa
+      indiceDiscagem = 0;
+      discagemRealizada[0] = '\0';
+      
+    } 
+    // 2. Lógica de APAGAR (tecla *)
+    else if (tecla == '*') {
+      if (indiceDiscagem > 0) {
+        indiceDiscagem--; 
+        discagemRealizada[indiceDiscagem] = '\0'; // CORRIGIDO
+        Serial.println("Apagou o ultimo digito.");
+      }
+    } 
+    // 3. Lógica de GUARDAR NÚMEROS (0 a 9)
+    else {
+      if (indiceDiscagem < 3) {
+        discagemRealizada[indiceDiscagem] = tecla; // CORRIGIDO
+        indiceDiscagem++;                       
+        discagemRealizada[indiceDiscagem] = '\0';  // CORRIGIDO
+        
+        Serial.print("Discagem parcial: ");
+        Serial.println(discagemRealizada);
+      } else {
+        Serial.println("Limite maximo de caracteres atingido!");
+      }
+    }
+    delay(200);
+  }
+}
 void setup() {
   Serial.begin(9600);
   
@@ -117,6 +178,13 @@ void setup() {
 
 void loop() {
   char tecla = lerTeclado();
-  guardaSenha(tecla);
+  // O loop executa uma máquina de estados simples
+  if (policiaAtendeu == false) {
+    // Fase 1: O jogador ainda precisa discar 190
+    discaNumero(tecla); 
+  } else {
+    // Fase 2: O 190 já foi discado com sucesso, agora é o suspeito
+    guardaSenha(tecla); 
+  }
 
 }
