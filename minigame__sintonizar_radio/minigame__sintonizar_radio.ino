@@ -36,18 +36,9 @@ void sintoniza_radio(uint16_t valor) {
        lcd.setCursor(0,0);
       lcd.print("Esta ligado");
       Serial.println(radio_sintonizado);
+      Serial.println("Dica: Um batom foi encontrado na cena do crime");
     }
   }
-  
-//void tela_contador(){
-  //if (radio_sintonizado == 1){
-    
-
- // } else{
-    //lcd.noBacklight();
- // }
-  //se não sintonizar, não faz nada
-//}
  
 uint16_t meu_analogRead(uint8_t canal) {
   ADMUX = (ADMUX & 0xF0) | canal; // escolhe A0..A5
@@ -94,5 +85,4 @@ void loop() {
   uint16_t valor = meu_analogRead(0);
   sintoniza_radio(valor); // A0
   Serial.println(valor);
- 
 }
