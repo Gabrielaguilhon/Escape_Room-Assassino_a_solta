@@ -94,8 +94,9 @@ char discagem[] = "190";
 char discagemRealizada[4] = "";
 int indiceDiscagem = 0;
 bool policiaAtendeu = false;
+bool msgDiscagemMostrada = false;
 
-char senha_real[] = "166111"; // AnaB
+char senha_real[] = "266222"; // AnaB
 char senha_digitada[7] = "";
 int indiceSenha = 0;
 
@@ -700,8 +701,12 @@ void loop() {
 
         // 4º MINI-GAME: DISCAGEM E DECLARAÇÃO DO ASSASSINO
         case DISCAGEM: {
+            if (!msgDiscagemMostrada) {
+                Serial.println(F("Disque para fazer sua denuncia:"));
+                msgDiscagemMostrada = true;
+            }
+
             char tecla = lerTeclado();
-            Serial.println(F("Disque para fazer sua denuncia:"));
             if (tecla != '\0' && (meu_millis() - ultimo_toque >= TEMPO_DEBOUNCE)) {
                 ultimo_toque = meu_millis();
 
