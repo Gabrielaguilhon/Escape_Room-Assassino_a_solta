@@ -23,7 +23,7 @@ uint8_t erros = 0;
 const uint8_t MAX_ERROS = 3;
 
 // Estados principais unificados
-enum Estado { MENU, RADIO, LEDS, MORSE, DISCAGEM, VITORIA, DERROTA };
+enum Estado { MENU, RADIO, LEDS, MORSE, DISCAGEM, VITORIA, DERROTA, REINICIALIZACAO };
 Estado estado_atual = MENU;
 bool game_over_enviado = false; // garante que "GAME_OVER" é enviado uma única vez
 bool sirene_tocada = false;     // garante que a sirene de vitória toca uma única vez
@@ -43,9 +43,10 @@ uint32_t tempo_ultimo_lcd = 0;
 int radio_sintonizado = 0; // começa não sintonizado
 uint32_t tempo_ultimo_status_radio = 0;
 const uint32_t INTERVALO_STATUS_RADIO = 500; // evita spam na Serial
-// Efeito "mau contato" do LCD enquanto o rádio não foi sintonizado
-bool lcd_piscando_aceso = false;
-uint32_t tempo_proxima_piscada = 0;
+// Efeito "mau contato" do LCD enquanto o rádio não foi sintonizado (desativado:
+// o LCD fica apagado até a sintonia)
+//bool lcd_piscando_aceso = false;
+//uint32_t tempo_proxima_piscada = 0;
 
 // ==========================================
 // 2. VARIÁVEIS DO MINI-GAME LEDS
@@ -160,7 +161,7 @@ uint32_t tempo_decorrido(uint32_t tempo_atual) {
 }
 
 // Recebe o tempo DECORRIDO da partida (ver tempo_decorrido()).
-// Até o rádio ser sintonizado o tempo fica oculto (o LCD só pisca, ver piscar_lcd()).
+// Até o rádio ser sintonizado o tempo fica oculto (LCD apagado).
 void mostrar_tempo_restante(uint32_t tempo_atual) {
     if (!radio_sintonizado) {
         return;
@@ -208,9 +209,9 @@ uint16_t meu_analogRead(uint8_t canal) {
     return ADC;
 }
 
-// Antes da sintonia: backlight liga/desliga em intervalos irregulares (mau contato /
-// interferência), com o ecrã vazio para o tempo continuar oculto.
-void piscar_lcd(uint32_t tempo_atual) {
+// (Desativado) Antes da sintonia: backlight liga/desliga em intervalos irregulares
+// (mau contato / interferência), com o ecrã vazio para o tempo continuar oculto.
+/*void piscar_lcd(uint32_t tempo_atual) {
     if (tempo_atual < tempo_proxima_piscada) {
         return;
     }
@@ -222,7 +223,7 @@ void piscar_lcd(uint32_t tempo_atual) {
         lcd.noBacklight();
         tempo_proxima_piscada = tempo_atual + 60 + (rand() % 500);  // apagado mais tempo
     }
-}
+}*/
 
 void sintoniza_radio(uint16_t valor, uint32_t tempo_atual) {
     if (valor > LIMIAR_ALTO || valor < LIMIAR_BAIXO) {
@@ -232,7 +233,7 @@ void sintoniza_radio(uint16_t valor, uint32_t tempo_atual) {
         // Mensagem de status no máximo a cada 500 ms
         if (tempo_atual - tempo_ultimo_status_radio >= INTERVALO_STATUS_RADIO) {
             tempo_ultimo_status_radio = tempo_atual;
-            Serial.println(F("MSG:Apenas estatica... continue girando o potenciometro."));
+            Serial.println(F("MSG:Radio nao sintonizado... continue girando o potenciometro."));
         }
     } else {
         radio_sintonizado = 1;
@@ -300,7 +301,7 @@ uint16_t ler_adc(uint8_t canal) {
 // ==========================================
 void som_facada() {
     uint32_t tempo = meu_millis();
-    while (tempo > 0) {
+    while (meu_millis() - tempo < 5000) {
         for (int i = 0; i < 40; i++) {
             meu_tone(random(120, 950));
             meu_delay(1);
@@ -431,6 +432,68 @@ void discaNumero(char tecla) {
     }
 }
 
+// Função que retoma todas as variáveis globais para o seu estado inicial
+void reinicializar_jogo() {
+    // 1. Zera a base de tempo de forma segura
+    cli();
+    ms = 0;
+    sei();
+
+    // 2. Reseta as variáveis globais da partida
+    jogo_iniciado = false;
+    tempo_inicio_jogo = 0;
+    tempo_total = 12UL * 60UL * 1000UL; 
+    penalidade_acumulada = 0;
+    erros = 0;
+    game_over_enviado = false;
+    sirene_tocada = false;
+
+    // 3. Reseta o rádio
+    radio_sintonizado = 0;
+    tempo_ultimo_status_radio = 0;
+    //lcd_piscando_aceso = false;
+    //tempo_proxima_piscada = 0;
+    
+    // 4. Reseta os LEDs
+    estado_leds = GERAR_SEQ;
+    round_atual = 1;
+    passo_seq = 0;
+    passo_jogador = 0;
+    led_aceso = false;
+    confirma_pressionado = false;
+    estado_botoes_anterior = 0;
+    PORTD &= ~MASCARA_LEDS; // Garante LEDs apagados
+
+    // 5. Reseta o Código Morse
+    letraAtual = "";
+    senhaDigitada = "";
+    estadoAnterior = 0;
+    estadoMaximo = 0;
+
+    // 6. Reseta a Discagem
+    indiceDiscagem = 0;
+    discagemRealizada[0] = '\0';
+    policiaAtendeu = false;
+    msgDiscagemMostrada = false;
+    indiceSenha = 0;
+    senha_digitada[0] = '\0';
+    ultimo_toque = 0;
+
+    // 7. Limpa periféricos (Som e LCD)
+    meu_noTone();
+    lcd.clear();
+    lcd.noBacklight();
+
+    // 8. Limpa o buffer da Serial
+    while(Serial.available() > 0) {
+        Serial.read();
+    }
+
+    // 9. Volta para a interface inicial
+    Serial.println(F("\n--- Escape Room Reiniciado ---"));
+    estado_atual = MENU;
+}
+
 // ==========================================
 // COMUNICAÇÃO COM O FRONT-END
 // ==========================================
@@ -458,7 +521,7 @@ void setup() {
     Serial.begin(9600);
     lcd.init();
     lcd.clear();
-    lcd.noBacklight(); // vazio; pisca (piscar_lcd) até o rádio ser sintonizado
+    lcd.noBacklight(); // vazio e apagado até o rádio ser sintonizado
     softWire.begin();
 
     cli();
@@ -522,21 +585,23 @@ void loop() {
     }
     uint32_t tempo_jogo = tempo_decorrido(tempo_atual);
 
-    // LCD antes da sintonia: pisca sem mostrar o tempo
+    // LCD antes da sintonia: fica apagado (efeito de piscar desativado)
     if (radio_sintonizado == 0 && estado_atual != VITORIA && estado_atual != DERROTA) {
-        piscar_lcd(tempo_atual);
+        //piscar_lcd(tempo_atual);
     }
 
     // LCD: cronômetro só depois de o rádio ser sintonizado e com o jogo em curso
-    // (em VITORIA/DERROTA o tempo fica congelado)
+    // (em VITORIA/DERROTA/REINICIALIZACAO o tempo fica congelado)
     if (radio_sintonizado == 1 && estado_atual != VITORIA && estado_atual != DERROTA &&
+        estado_atual != REINICIALIZACAO &&
         tempo_atual - tempo_ultimo_lcd >= 1000) {
         tempo_ultimo_lcd = tempo_atual;
         mostrar_tempo_restante(tempo_jogo);
     }
 
     // Verifica condições de derrota (Tempo esgotado ou 3+ erros) só com a partida em curso
-    if (jogo_iniciado && estado_atual != DERROTA && estado_atual != VITORIA) {
+    if (jogo_iniciado && estado_atual != DERROTA && estado_atual != VITORIA &&
+        estado_atual != REINICIALIZACAO) {
         if (tempo_jogo >= tempo_total) {
             estado_atual = DERROTA;
             mostrar_tempo_restante(tempo_jogo); // congela em 00:00
@@ -848,23 +913,35 @@ void loop() {
         }
 
         case VITORIA:
-            // Toca a sirene uma única vez; depois o Arduino fica parado em VITORIA
+            // Toca a sirene uma única vez e aguarda o reset em REINICIALIZACAO
             if (!sirene_tocada) {
                 sirene_tocada = true;
                 PORTD &= ~MASCARA_LEDS;
                 som_sirene();
+
+                Serial.println(F("MSG:Pressione 'R' no teclado para reiniciar a sala."));
+                estado_atual = REINICIALIZACAO;
             }
             break;
 
         case DERROTA:
-            // Avisa o front-end uma única vez (som_facada() não retorna)
+            // Avisa o front-end uma única vez, toca o som e aguarda o reset
             if (!game_over_enviado) {
                 game_over_enviado = true;
                 PORTD &= ~MASCARA_LEDS;
                 Serial.println(F("GAME_OVER"));
                 Serial.flush();
+
+                som_facada();
+                Serial.println(F("MSG:Pressione 'R' no teclado para reiniciar a sala."));
+                estado_atual = REINICIALIZACAO;
             }
-            som_facada();
+            break;
+
+        case REINICIALIZACAO:
+            if (comando == 'R' || comando == 'r') { // Comando simplificado para reset
+                reinicializar_jogo();
+            }
             break;
     }
 }
