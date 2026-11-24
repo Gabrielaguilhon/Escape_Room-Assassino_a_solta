@@ -25,6 +25,13 @@ const uint8_t MAX_ERROS = 3;
 // Estados principais unificados
 enum Estado { MENU, RADIO, LEDS, MORSE, DISCAGEM, VITORIA, DERROTA };
 Estado estado_atual = MENU;
+bool game_over_enviado = false; // garante que "GAME_OVER" é enviado uma única vez
+bool sirene_tocada = false;     // garante que a sirene de vitória toca uma única vez
+
+// Cronômetro da partida: só começa quando o front-end envia 'S' (menu "Iniciar Jogo")
+// ou, se alguém testar sem o menu, ao receber o primeiro comando de minigame
+bool jogo_iniciado = false;
+uint32_t tempo_inicio_jogo = 0;
 
 // ==========================================
 // 1. VARIÁVEIS DO MINI-GAME RÁDIO
@@ -34,6 +41,11 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 #define LIMIAR_BAIXO 600 // abaixo disso: ruídos
 uint32_t tempo_ultimo_lcd = 0;
 int radio_sintonizado = 0; // começa não sintonizado
+uint32_t tempo_ultimo_status_radio = 0;
+const uint32_t INTERVALO_STATUS_RADIO = 500; // evita spam na Serial
+// Efeito "mau contato" do LCD enquanto o rádio não foi sintonizado
+bool lcd_piscando_aceso = false;
+uint32_t tempo_proxima_piscada = 0;
 
 // ==========================================
 // 2. VARIÁVEIS DO MINI-GAME LEDS
@@ -142,7 +154,19 @@ void meu_noTone() {
     clr_bit(PORTD, PD6);
 }
 
+// Tempo de jogo decorrido (0 enquanto a partida não começou)
+uint32_t tempo_decorrido(uint32_t tempo_atual) {
+    return jogo_iniciado ? (tempo_atual - tempo_inicio_jogo) : 0;
+}
+
+// Recebe o tempo DECORRIDO da partida (ver tempo_decorrido()).
+// Até o rádio ser sintonizado o tempo fica oculto (o LCD só pisca, ver piscar_lcd()).
 void mostrar_tempo_restante(uint32_t tempo_atual) {
+    if (!radio_sintonizado) {
+        return;
+    }
+
+    lcd.backlight();
     if (tempo_atual >= tempo_total) {
         lcd.setCursor(0, 0);
         lcd.print(F("Tempo: 00:00   "));
@@ -154,7 +178,6 @@ void mostrar_tempo_restante(uint32_t tempo_atual) {
     uint8_t minutos = segundos_totais / 60;
     uint8_t segundos = segundos_totais % 60;
 
-    lcd.backlight();
     lcd.setCursor(0, 0);
     lcd.print(F("Tempo: "));
     
@@ -185,28 +208,44 @@ uint16_t meu_analogRead(uint8_t canal) {
     return ADC;
 }
 
-void sintoniza_radio(uint16_t valor) {
+// Antes da sintonia: backlight liga/desliga em intervalos irregulares (mau contato /
+// interferência), com o ecrã vazio para o tempo continuar oculto.
+void piscar_lcd(uint32_t tempo_atual) {
+    if (tempo_atual < tempo_proxima_piscada) {
+        return;
+    }
+    lcd_piscando_aceso = !lcd_piscando_aceso;
+    if (lcd_piscando_aceso) {
+        lcd.backlight();
+        tempo_proxima_piscada = tempo_atual + 30 + (rand() % 150);  // flash curto
+    } else {
+        lcd.noBacklight();
+        tempo_proxima_piscada = tempo_atual + 60 + (rand() % 500);  // apagado mais tempo
+    }
+}
+
+void sintoniza_radio(uint16_t valor, uint32_t tempo_atual) {
     if (valor > LIMIAR_ALTO || valor < LIMIAR_BAIXO) {
-        radio_sintonizado = 0;
+        // (radio_sintonizado não volta a 0: depois da 1ª sintonia o LCD fica ligado)
         uint16_t frequencia_chiado = 500 + (rand() % 2000);
         meu_tone(frequencia_chiado);
-        Serial.println(F("Voce ainda nao conseguiu sintonizar o radio, esta perdendo tempo..."));
-        lcd.noBacklight();
+        // Mensagem de status no máximo a cada 500 ms
+        if (tempo_atual - tempo_ultimo_status_radio >= INTERVALO_STATUS_RADIO) {
+            tempo_ultimo_status_radio = tempo_atual;
+            Serial.println(F("MSG:Apenas estatica... continue girando o potenciometro."));
+        }
     } else {
         radio_sintonizado = 1;
         meu_noTone();
-        //Serial.println(F("Sinal Radio: "));
-        Serial.println(F("Radio sintonizado"));
-        // Atualiza o LCD automaticamente a cada 1 segundo (1000 ms)
-        
-        //lcd.backlight();
-        //lcd.setCursor(0, 0);
-        //lcd.print(F("Está ligado"));
-        Serial.println(radio_sintonizado);
+        // Liga o display e mostra o cronômetro imediatamente
+        tempo_ultimo_lcd = tempo_atual;
+        mostrar_tempo_restante(tempo_decorrido(tempo_atual));
+        Serial.println(F("MSG:Radio sintonizado!"));
         Serial.println(F("Dica: Um batom foi encontrado na cena do crime"));
 
-        // Passa para o próximo mini-game (LEDs)
-        estado_atual = LEDS;
+        // Devolve o controle ao front-end
+        Serial.println(F("WIN_R"));
+        estado_atual = MENU;
     }
 }
 
@@ -237,11 +276,11 @@ void registrar_erro(uint32_t tempo_atual) {
         tempo_total = 0;
     }
 
-    Serial.print(F("--- ARMA ERRADA! Penalidade de 30s aplicada. Erros: "));
+    Serial.print(F("MSG:ARMA ERRADA! Penalidade de 30s aplicada. Erros: "));
     Serial.print(erros);
     Serial.print(F("/"));
     Serial.println((MAX_ERROS));
-    mostrar_tempo_restante(tempo_atual);
+    mostrar_tempo_restante(tempo_decorrido(tempo_atual));
 }
 
 uint16_t ler_adc(uint8_t canal) {
@@ -315,16 +354,15 @@ void guardaSenha(char tecla) {
         if (tecla == '#') {
             senha_digitada[indiceSenha] = '\0';
 
-            Serial.print(F("Jogador tentou o suspeito: "));
+            Serial.print(F("MSG:Suspeito indicado: "));
             Serial.println(senha_digitada);
 
             if (strcmp(senha_digitada, senha_real) == 0) {
-                Serial.println(F("ACERTOU!"));
-                //som_sirene();
+                Serial.println(F("MSG:ACERTOU! O assassino foi preso!"));
+                Serial.println(F("WIN_T"));
                 estado_atual = VITORIA;
             } else {
-                Serial.println(F("ERROU!"));
-                //som_facada();
+                Serial.println(F("MSG:ERROU! O assassino escapou..."));
                 estado_atual = DERROTA;
             }
 
@@ -335,7 +373,7 @@ void guardaSenha(char tecla) {
             if (indiceSenha > 0) {
                 indiceSenha--;
                 senha_digitada[indiceSenha] = '\0';
-                Serial.println(F("Apagou o ultimo digito."));
+                Serial.println(F("MSG:Apagou o ultimo digito."));
             }
         }
         else {
@@ -344,10 +382,10 @@ void guardaSenha(char tecla) {
                 indiceSenha++;
                 senha_digitada[indiceSenha] = '\0';
 
-                Serial.print(F("Senha parcial: "));
+                Serial.print(F("MSG:Senha parcial: "));
                 Serial.println(senha_digitada);
             } else {
-                Serial.println(F("Limite maximo de caracteres atingido!"));
+                Serial.println(F("MSG:Limite maximo de caracteres atingido!"));
             }
         }
     }
@@ -362,10 +400,10 @@ void discaNumero(char tecla) {
             discagemRealizada[indiceDiscagem] = '\0';
 
             if (strcmp(discagemRealizada, discagem) == 0) {
-                Serial.println(F("Você foi atendido! Pode indicar o assassino."));
+                Serial.println(F("MSG:Voce foi atendido! Digite o nome do assassino e aperte #."));
                 policiaAtendeu = true;
             } else {
-                Serial.println(F("Sua discagem está inadequada! Repita, por favor!"));
+                Serial.println(F("MSG:Numero errado! Disque novamente e aperte #."));
             }
 
             indiceDiscagem = 0;
@@ -375,7 +413,7 @@ void discaNumero(char tecla) {
             if (indiceDiscagem > 0) {
                 indiceDiscagem--;
                 discagemRealizada[indiceDiscagem] = '\0';
-                Serial.println(F("Apagou o ultimo digito."));
+                Serial.println(F("MSG:Apagou o ultimo digito."));
             }
         }
         else {
@@ -384,18 +422,43 @@ void discaNumero(char tecla) {
                 indiceDiscagem++;
                 discagemRealizada[indiceDiscagem] = '\0';
 
-                Serial.print(F("Discagem parcial: "));
+                Serial.print(F("MSG:Discagem parcial: "));
                 Serial.println(discagemRealizada);
             } else {
-                Serial.println(F("Limite maximo de caracteres atingido!"));
+                Serial.println(F("MSG:Limite maximo de caracteres atingido!"));
             }
         }
     }
 }
 
+// ==========================================
+// COMUNICAÇÃO COM O FRONT-END
+// ==========================================
+// Lê um comando de 1 caractere da Serial (ignora '\n', '\r' e espaços).
+// Devolve '\0' se não houver nada para ler.
+char ler_comando() {
+    while (Serial.available() > 0) {
+        char c = Serial.read();
+        if (c != '\n' && c != '\r' && c != ' ') {
+            return c;
+        }
+    }
+    return '\0';
+}
+
+// Desliga LEDs e buzzer e volta ao MENU (comando 'X' do front-end)
+void cancelar_minigame() {
+    PORTD &= ~MASCARA_LEDS;
+    meu_noTone();
+    estado_atual = MENU;
+    Serial.println(F("MSG:Minigame cancelado."));
+}
+
 void setup() {
     Serial.begin(9600);
     lcd.init();
+    lcd.clear();
+    lcd.noBacklight(); // vazio; pisca (piscar_lcd) até o rádio ser sintonizado
     softWire.begin();
 
     cli();
@@ -433,8 +496,7 @@ void setup() {
     sei();
 
     Serial.println(F("--- Escape Room Iniciado ---"));
-    mostrar_tempo_restante(0);
-    estado_atual = RADIO;
+    estado_atual = MENU; // aguarda o front-end escolher o minigame
 }
 
 // ==========================================
@@ -442,15 +504,42 @@ void setup() {
 // ==========================================
 void loop() {
     uint32_t tempo_atual = meu_millis();
-    if (tempo_atual - tempo_ultimo_lcd >= 1000) {
-        tempo_ultimo_lcd = tempo_atual;
-        mostrar_tempo_restante(tempo_atual);
-        }
 
-    // Verifica condições de derrota (Tempo esgotado ou 3+ erros)
+    // Comando vindo do front-end (só faz sentido fora de VITORIA/DERROTA)
+    char comando = '\0';
     if (estado_atual != DERROTA && estado_atual != VITORIA) {
-        if (tempo_atual >= tempo_total) {
+        comando = ler_comando();
+    }
+
+    // Início da partida: 'S' do menu do Python, ou o primeiro comando de minigame
+    // (caso alguém teste sem o menu). O cronômetro conta a partir daqui.
+    if (!jogo_iniciado && (comando == 'S' || comando == 'R' || comando == 'G' ||
+                           comando == 'M' || comando == 'T')) {
+        jogo_iniciado = true;
+        tempo_inicio_jogo = tempo_atual;
+        tempo_ultimo_lcd = tempo_atual;
+        Serial.println(F("MSG:Partida iniciada! Cronometro a contar."));
+    }
+    uint32_t tempo_jogo = tempo_decorrido(tempo_atual);
+
+    // LCD antes da sintonia: pisca sem mostrar o tempo
+    if (radio_sintonizado == 0 && estado_atual != VITORIA && estado_atual != DERROTA) {
+        piscar_lcd(tempo_atual);
+    }
+
+    // LCD: cronômetro só depois de o rádio ser sintonizado e com o jogo em curso
+    // (em VITORIA/DERROTA o tempo fica congelado)
+    if (radio_sintonizado == 1 && estado_atual != VITORIA && estado_atual != DERROTA &&
+        tempo_atual - tempo_ultimo_lcd >= 1000) {
+        tempo_ultimo_lcd = tempo_atual;
+        mostrar_tempo_restante(tempo_jogo);
+    }
+
+    // Verifica condições de derrota (Tempo esgotado ou 3+ erros) só com a partida em curso
+    if (jogo_iniciado && estado_atual != DERROTA && estado_atual != VITORIA) {
+        if (tempo_jogo >= tempo_total) {
             estado_atual = DERROTA;
+            mostrar_tempo_restante(tempo_jogo); // congela em 00:00
             Serial.println("\n--- O TEMPO ACABOU! FIM DE JOGO ---");
             PORTD &= ~MASCARA_LEDS;
         } else if (erros >= MAX_ERROS) {
@@ -460,15 +549,54 @@ void loop() {
         }
     }
 
+    // 'X' cancela qualquer minigame em curso
+    if (comando == 'X' && (estado_atual == RADIO || estado_atual == LEDS ||
+                           estado_atual == MORSE || estado_atual == DISCAGEM)) {
+        cancelar_minigame();
+        return;
+    }
+
     switch (estado_atual) {
+        // Aguardando o front-end escolher o minigame
         case MENU: {
+            switch (comando) {
+                case 'R':
+                    tempo_ultimo_status_radio = 0;
+                    estado_atual = RADIO;
+                    Serial.println(F("MSG:Radio ligado. Sintonize a frequencia!"));
+                    break;
+                case 'G':
+                    round_atual = 1;
+                    estado_leds = GERAR_SEQ;
+                    PORTD &= ~MASCARA_LEDS;
+                    estado_atual = LEDS;
+                    break;
+                case 'M':
+                    letraAtual = "";
+                    senhaDigitada = "";
+                    estadoAnterior = 0;
+                    estadoMaximo = 0;
+                    estado_atual = MORSE;
+                    Serial.println(F("MSG:Digite a arma do crime em Morse!"));
+                    break;
+                case 'T':
+                    msgDiscagemMostrada = false;
+                    indiceDiscagem = 0;
+                    discagemRealizada[0] = '\0';
+                    indiceSenha = 0;
+                    senha_digitada[0] = '\0';
+                    estado_atual = DISCAGEM;
+                    break;
+                default:
+                    break;
+            }
             break;
         }
-        // 1º MINI-GAME: RÁDIO
+
+        // MINI-GAME: RÁDIO
         case RADIO: {
             uint16_t valor = meu_analogRead(0);
-            sintoniza_radio(valor);
-            Serial.println(valor);
+            sintoniza_radio(valor, tempo_atual);
             break;
         }
 
@@ -492,10 +620,9 @@ void loop() {
                     tempo_led_anterior = tempo_atual;
                     estado_leds = MOSTRAR_SEQ;
 
-                    Serial.print(F("--- ROUND "));
+                    Serial.print(F("MSG:Round "));
                     Serial.print(round_atual);
-                    Serial.println(F(" ---"));
-                    Serial.println(F("Atencao! Mostrando sequencia..."));
+                    Serial.println(F(" - Atencao! Mostrando sequencia..."));
                     break;
                 }
 
@@ -519,7 +646,7 @@ void loop() {
                                 confirma_pressionado = false;
                                 estado_botoes_anterior = ler_estado_botoes();
                                 estado_leds = ESPERAR_JOGADOR;
-                                Serial.println(F("Sua vez! Repita a sequencia e aperte CONFIRMA (Pino 2)."));
+                                Serial.println(F("MSG:Sua vez! Repita a sequencia e aperte CONFIRMA."));
                             }
                         }
                     }
@@ -557,7 +684,7 @@ void loop() {
                             resposta_jogador[passo_jogador] = botao_pressionado;
                             passo_jogador++;
 
-                            Serial.print(F("-> Registrado ("));
+                            Serial.print(F("MSG:Registrado ("));
                             Serial.print(passo_jogador);
                             Serial.print(F("/"));
                             Serial.print(qtd_leds);
@@ -565,10 +692,10 @@ void loop() {
                             Serial.println(nomes_cores[botao_pressionado]);
 
                             if (passo_jogador == qtd_leds) {
-                                Serial.println(F("Sequencia preenchida! Aperte CONFIRMA para validar."));
+                                Serial.println(F("MSG:Sequencia preenchida! Aperte CONFIRMA para validar."));
                             }
                         } else {
-                            Serial.println(F("Limite atingido! Aperte CONFIRMA para validar."));
+                            Serial.println(F("MSG:Limite atingido! Aperte CONFIRMA para validar."));
                         }
                     }
 
@@ -587,17 +714,18 @@ void loop() {
                         }
 
                         if (acertou) {
-                            Serial.println(F("ACERTOU a sequencia!"));
                             round_atual++;
 
                             if (round_atual > 4) {
-                                Serial.println(F("\nMini-game concluido!"));
-                                Serial.println(F("Dica desbloqueada: Foi encontrado um OCULOS e um OBJETO PONTIAGUDO na cena do crime\n"));
-                                mostrar_tempo_restante(tempo_atual);
-                                Serial.println(F("Digite a arma do crime!"));
-                                estado_atual = MORSE;
+                                Serial.println(F("MSG:Mini-game concluido!"));
+                                Serial.println(F("Dica desbloqueada: Foi encontrado um OCULOS e um OBJETO PONTIAGUDO na cena do crime"));
+                                mostrar_tempo_restante(tempo_jogo);
+
+                                // Devolve o controle ao front-end
+                                Serial.println(F("WIN_G"));
+                                estado_atual = MENU;
                             } else {
-                                Serial.println(F("\nRound concluido!"));
+                                Serial.println(F("MSG:ACERTOU! Round concluido!"));
                                 tempo_led_anterior = tempo_atual;
                                 estado_leds = ESPERAR_PROXIMO_ROUND;
                             }
@@ -613,11 +741,10 @@ void loop() {
                                     tempo_total = 0;
                                 }
 
-                                Serial.print(F("ERROU a sequencia! (Erro "));
+                                Serial.print(F("MSG:ERROU a sequencia! (Erro "));
                                 Serial.print(erros);
-                                Serial.println(F("/3) Penalidade de 30s aplicada. Voltando para o Round 1..."));
-                                mostrar_tempo_restante(tempo_atual);
-                                Serial.println();
+                                Serial.println(F("/3) Penalidade de 30s. Voltando para o Round 1..."));
+                                mostrar_tempo_restante(tempo_jogo);
 
                                 round_atual = 1;
                                 tempo_led_anterior = tempo_atual;
@@ -655,40 +782,37 @@ void loop() {
                 if (estadoAtual == 0 && estadoAnterior != 0) {
                     if (estadoMaximo == 3) {
                         if (letraAtual != "") {
-                            Serial.println();
-                            Serial.print(F("Letra confirmada: "));
+                            Serial.print(F("MSG:Letra confirmada: "));
                             Serial.println(letraAtual);
 
                             senhaDigitada += letraAtual + " ";
 
-                            Serial.print(F("Palavra atual (em Morse): "));
+                            Serial.print(F("MSG:Senha parcial (Morse): "));
                             Serial.println(senhaDigitada);
 
                             letraAtual = "";
                         }
                         else if (senhaDigitada != "") {
-                            Serial.println();
-                            Serial.println(F(">>> VERIFICANDO SENHA <<<"));
+                            Serial.println(F("MSG:Verificando senha..."));
 
                             if (senhaDigitada == senhaCorreta) {
-                                Serial.println("===============================");
-                                Serial.println(F("\nMini-game concluido!\nDica desbloqueada: Foi encontrado um FIO DE CABELO RUIVO na cena do crime!\n"));
-                                mostrar_tempo_restante(tempo_atual);
-                                Serial.println("===============================");
-                                estado_atual = DISCAGEM; // Avança para o 4º mini-game
+                                Serial.println(F("MSG:Mini-game concluido!"));
+                                Serial.println(F("Dica desbloqueada: Foi encontrado um FIO DE CABELO RUIVO na cena do crime!"));
+                                mostrar_tempo_restante(tempo_jogo);
+
+                                // Devolve o controle ao front-end
+                                Serial.println(F("WIN_M"));
+                                estado_atual = MENU;
                             } else {
                                 registrar_erro(tempo_atual);
                                 senhaDigitada = "";
                             }
                         }
                     }
-                    else if (estadoMaximo == 1) {
-                        letraAtual += ".";
-                        Serial.print(".");
-                    }
-                    else if (estadoMaximo == 2) {
-                        letraAtual += "-";
-                        Serial.print("-");
+                    else if (estadoMaximo == 1 || estadoMaximo == 2) {
+                        letraAtual += (estadoMaximo == 1) ? "." : "-";
+                        Serial.print(F("MSG:Letra atual: "));
+                        Serial.println(letraAtual);
                     }
 
                     estadoMaximo = 0;
@@ -702,7 +826,11 @@ void loop() {
         // 4º MINI-GAME: DISCAGEM E DECLARAÇÃO DO ASSASSINO
         case DISCAGEM: {
             if (!msgDiscagemMostrada) {
-                Serial.println(F("Disque para fazer sua denuncia:"));
+                if (policiaAtendeu) {
+                    Serial.println(F("MSG:Policia na linha. Digite o nome do assassino e aperte #."));
+                } else {
+                    Serial.println(F("MSG:Disque para fazer sua denuncia e aperte #."));
+                }
                 msgDiscagemMostrada = true;
             }
 
@@ -720,10 +848,22 @@ void loop() {
         }
 
         case VITORIA:
-            som_sirene();
+            // Toca a sirene uma única vez; depois o Arduino fica parado em VITORIA
+            if (!sirene_tocada) {
+                sirene_tocada = true;
+                PORTD &= ~MASCARA_LEDS;
+                som_sirene();
+            }
             break;
 
         case DERROTA:
+            // Avisa o front-end uma única vez (som_facada() não retorna)
+            if (!game_over_enviado) {
+                game_over_enviado = true;
+                PORTD &= ~MASCARA_LEDS;
+                Serial.println(F("GAME_OVER"));
+                Serial.flush();
+            }
             som_facada();
             break;
     }
