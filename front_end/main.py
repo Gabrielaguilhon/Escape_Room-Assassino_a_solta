@@ -14,9 +14,12 @@ Máquina de estados não-bloqueante:
     DERROTA    -> o Arduino enviou "GAME_OVER" (tempo esgotado, 3 erros ou assassino errado)
     VITORIA    -> recebeu "WIN_T" (assassino identificado no telefone) ou os 4 minigames
                   foram concluídos: ecrã final de vitória, a partida termina
+    Em VITORIA/DERROTA: R envia 'R' ao Arduino (estado REINICIALIZACAO -> reinicializar_jogo()),
+                  reseta todo o estado do front-end e volta ao menu inicial; ESC sai do jogo.
 
 Protocolo Serial (9600 baud, uma mensagem por linha):
-    PC -> Arduino: S (iniciar partida), R | G | M | T (iniciar minigame), X (cancelar minigame)
+    PC -> Arduino: S (iniciar partida), R | G | M | T (iniciar minigame), X (cancelar minigame),
+                   R em VITORIA/DERROTA (reiniciar a sala: o Arduino está em REINICIALIZACAO)
     Arduino -> PC: WIN_R | WIN_G | WIN_M | WIN_T, GAME_OVER, MSG:<texto para o ecrã>
 
 Controlos: WASD para mover, E para interagir.
@@ -147,6 +150,7 @@ LINHA_IDLE = 0   # linhas 0-3
 LINHA_WALK = 4   # linhas 4-7
 LINHA_MORTE = 16  # penúltima linha: o mago a cair (4 frames)
 ESCALA_PLAYER = 5
+POS_INICIAL_PLAYER = (LARGURA // 2, ALTURA // 2 + 40)
 
 # ---------------------------------------------------------------------------
 # Decoração (assets/decoracao.jfif): retângulos de recorte na imagem original
@@ -235,6 +239,16 @@ class ConexaoSerial:
         *linhas, self.buffer = self.buffer.split(b"\n")
         texto = (l.decode("utf-8", errors="ignore").strip() for l in linhas)
         return [l for l in texto if l]
+
+    def limpar_entrada(self):
+        """Descarta tudo o que ainda não foi lido (buffer interno e da porta)."""
+        self.buffer = b""
+        if not self.ligada:
+            return
+        try:
+            self.ser.reset_input_buffer()
+        except serial.SerialException as e:
+            self._falha(e)
 
     def _falha(self, e):
         self.erro = str(e)
@@ -804,6 +818,15 @@ class Player:
         if self.rect.topleft != antes:
             self.x, self.y = float(self.rect.x), float(self.rect.y)
 
+    def reiniciar(self, x, y):
+        """Volta à posição inicial, de pé e virado para baixo (desfaz a animação de morte)."""
+        self.morto = False
+        self.direcao = "baixo"
+        self.anim = "idle"
+        self.tempo_anim = 0.0
+        self.rect.center = (x, y)
+        self.x, self.y = float(self.rect.x), float(self.rect.y)
+
     def morrer(self):
         """Inicia a animação de morte (toca uma vez e fica no último frame)."""
         if self.frames_morte and not self.morto:
@@ -919,7 +942,7 @@ class Jogo:
         self.vinheta = criar_vinheta(LARGURA, ALTURA)
         self.fundo_menu, self.fundo_instrucoes = self.criar_fundos_menu()
         self.cartazes_grandes = carregar_cartazes_grandes()
-        self.player = Player(LARGURA // 2, ALTURA // 2 + 40,
+        self.player = Player(*POS_INICIAL_PLAYER,
                              carregar_frames_player(), carregar_frames_morte())
         self.estacoes = [Estacao(nome, dados) for nome, dados in MINIGAMES.items()]
         self.obstaculos = [est.solido for est in self.estacoes]
@@ -976,6 +999,27 @@ class Jogo:
             self.mudar_estado(VITORIA, nome)
         else:
             self.mudar_estado(DICA, nome)
+
+    def reiniciar_jogo(self):
+        """
+        Tecla R em VITORIA/DERROTA: o Arduino está em REINICIALIZACAO à espera de 'R'
+        para chamar reinicializar_jogo(). Em simultâneo, reseta todo o estado do
+        front-end e volta ao menu inicial (a nova partida arranca com 'S' em "Iniciar Jogo").
+        """
+        if self.serial.enviar("R"):
+            print("[Serial] Enviado: R (reiniciar a sala)")
+        # Mensagens antigas da Serial (ex.: o aviso "Pressione 'R'...") não interessam mais
+        self.serial.limpar_entrada()
+
+        for est in self.estacoes:  # minigames concluídos e, com eles, as dicas coletadas
+            est.concluido = False
+        self.player.reiniciar(*POS_INICIAL_PLAYER)  # posição inicial e fim da animação de morte
+        self.minigame_atual = None
+        self.tempo_aguardando = 0.0
+        self.ultima_msg = ""
+        self.opcao_menu = 0
+        print("[Jogo] Jogo reiniciado. De volta ao menu inicial.")
+        self.mudar_estado(TELA_INICIAL)
 
     def cancelar_minigame(self):
         """Pede ao Arduino para abandonar o minigame (desliga LEDs/buzzer e volta ao MENU)."""
@@ -1100,7 +1144,9 @@ class Jogo:
                         self.mudar_estado(JOGANDO)
 
                 elif self.estado in (DERROTA, VITORIA):
-                    if evento.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE):
+                    if evento.key == pygame.K_r:
+                        self.reiniciar_jogo()
+                    elif evento.key == pygame.K_ESCAPE:
                         self.a_correr = False
 
     # --- lógica -----------------------------------------------------------
@@ -1418,6 +1464,19 @@ class Jogo:
             self.ecra.blit(cartaz, r)
             x += r.width + espaco
 
+    def desenhar_opcoes_fim(self, caixa):
+        """Opções dos ecrãs finais: [R] Jogar Novamente / Reiniciar e [ESC] Sair do jogo."""
+        opcoes = (("R", "Jogar Novamente", AMARELO), ("ESC", "Sair do Jogo", CINZENTO))
+        largura, altura, espaco = 250, 40, 24
+        x = caixa.centerx - (2 * largura + espaco) // 2
+        for tecla, texto, cor in opcoes:
+            r = pygame.Rect(x, caixa.bottom - 18 - altura, largura, altura)
+            pygame.draw.rect(self.ecra, (16, 15, 20), r)
+            pygame.draw.rect(self.ecra, cor, r, 2)
+            t = self.fonte_media.render(f"[{tecla}]  {texto}", False, cor)
+            self.ecra.blit(t, t.get_rect(center=r.center))
+            x += largura + espaco
+
     def desenhar_derrota(self):
         """Ecrã de derrota: o mago cai no chão (anima e fica no último frame)."""
         sombra = pygame.Surface((LARGURA, ALTURA), pygame.SRCALPHA)
@@ -1453,8 +1512,7 @@ class Jogo:
             self.ecra.blit(s, s.get_rect(midtop=(caixa.centerx, y)))
             y += 34
 
-        r = self.fonte.render("[ENTER/ESC] Sair", False, CINZENTO)
-        self.ecra.blit(r, r.get_rect(midbottom=(caixa.centerx, caixa.bottom - 18)))
+        self.desenhar_opcoes_fim(caixa)
 
     def desenhar_vitoria(self):
         """Ecrã final de vitória: cobre o mapa inteiro e encerra a partida."""
@@ -1483,8 +1541,7 @@ class Jogo:
             self.ecra.blit(s, s.get_rect(midtop=(caixa.centerx, y)))
             y += 40
 
-        r = self.fonte.render("[ENTER/ESC] Sair", False, CINZENTO)
-        self.ecra.blit(r, r.get_rect(midbottom=(caixa.centerx, caixa.bottom - 18)))
+        self.desenhar_opcoes_fim(caixa)
 
     # --- loop principal ---------------------------------------------------
     def executar(self):
