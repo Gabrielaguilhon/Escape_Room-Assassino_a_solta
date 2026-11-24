@@ -1,0 +1,344 @@
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <stdlib.h>
+
+// Macros obrigatórias para manipulação de bits
+#define set_bit(reg, bit) ((reg) |= (1 << (bit)))
+#define clr_bit(reg, bit) ((reg) &= ~(1 << (bit)))
+#define cpl_bit(reg, bit) ((reg) ^= (1 << (bit)))
+#define tst_bit(reg, bit) ((reg) & (1 << (bit)))
+
+// Máscara apenas com os pinos dos LEDs (preserva o pull-up do PD2/INT0)
+#define MASCARA_LEDS ((1 << PD3) | (1 << PD4) | (1 << PD5) | (1 << PD7))
+
+volatile uint32_t ms = 0;
+
+// Flags da interrupção INT0 (Botão Confirma no Pino 2 / PD2)
+volatile bool confirma_pressionado = false;
+volatile uint32_t tempo_ultimo_confirma = 0;
+
+uint32_t tempo_total = 12UL * 60UL * 1000UL; // 12 minutos
+uint32_t penalidade_acumulada = 0;
+uint8_t erros = 0;
+
+// Máquina de estados principal
+enum Estado { MENU, LEDS, MORSE, DERROTA };
+Estado estado_atual = MENU;
+
+// Variáveis do Minigame dos LEDs
+enum SubEstadoLeds { GERAR_SEQ, MOSTRAR_SEQ, ESPERAR_JOGADOR, ESPERAR_PROXIMO_ROUND };
+SubEstadoLeds estado_leds = GERAR_SEQ;
+
+uint8_t round_atual = 1;
+uint8_t sequencia[5];
+uint8_t resposta_jogador[5]; // Guarda a sequência digitada até o Confirma
+uint8_t passo_seq = 0;
+uint8_t passo_jogador = 0;
+uint32_t tempo_led_anterior = 0;
+bool led_aceso = false;
+uint8_t estado_botoes_anterior = 0; 
+
+// Pinos dos LEDs (Porta D - Saídas)
+const uint8_t pinos_leds[4] = {PD7, PD3, PD5, PD4};
+
+// Conta o tempo em milissegundos
+ISR(TIMER1_COMPA_vect) {
+    ms++;
+}
+
+// Interrupção Externa INT0 (Pino Digital 2 - Botão CONFIRMA)
+ISR(INT0_vect) {
+    // Debounce de 200ms usando o contador ms
+    if (ms - tempo_ultimo_confirma > 200) {
+        confirma_pressionado = true;
+        tempo_ultimo_confirma = ms;
+    }
+}
+
+uint32_t meu_millis() {
+    uint32_t tempo;
+    cli();
+    tempo = ms;
+    sei();
+    return tempo;
+}
+
+// Envia um único caractere via UART com segurança
+void uart_print_char(char c) {
+    while (!(UCSR0A & (1 << UDRE0)));
+    UDR0 = c;
+}
+
+// Imprime string no Monitor Serial via UART
+void uart_print(const char* str) {
+    while (*str) {
+        uart_print_char(*str++);
+    }
+}
+
+// Imprime o tempo formatado (MM:SS)
+void mostrar_tempo_restante(uint32_t tempo_atual) {
+    if (tempo_atual >= tempo_total) {
+        uart_print("Tempo Restante: 00:00\n");
+        return;
+    }
+    
+    uint32_t tempo_restante_ms = tempo_total - tempo_atual;
+    uint32_t segundos_totais = tempo_restante_ms / 1000;
+    uint8_t minutos = segundos_totais / 60;
+    uint8_t segundos = segundos_totais % 60;
+    
+    char buffer[10];
+    
+    uart_print("Tempo Restante: ");
+    itoa(minutos, buffer, 10);
+    uart_print(buffer);
+    uart_print(":");
+    
+    if (segundos < 10) {
+        uart_print("0");
+    }
+    itoa(segundos, buffer, 10);
+    uart_print(buffer);
+    uart_print("\n");
+}
+
+// LÊ OS BOTÕES DAS CORES: Usando A1, A2, 11 e 10
+uint8_t ler_estado_botoes() {
+    uint8_t estado = 0;
+    
+    if (!tst_bit(PINC, PC1)) set_bit(estado, 0); // Botão 1 (Vermelho) -> A1
+    if (!tst_bit(PINC, PC2)) set_bit(estado, 1); // Botão 2 (Amarelo)  -> A2
+    if (!tst_bit(PINB, PB3)) set_bit(estado, 2); // Botão 3 (Verde)    -> 11
+    if (!tst_bit(PINB, PB2)) set_bit(estado, 3); // Botão 4 (Azul)     -> 10
+    
+    return estado;
+}
+
+void setup_hardware() {
+    cli(); // Desliga interrupções para configurar
+
+    // Configura Timer1 para contar milissegundos
+    TCCR1A = 0;
+    TCCR1B = (1 << WGM12) | (1 << CS11) | (1 << CS10);
+    OCR1A = 249;
+    TIMSK1 = (1 << OCIE1A);
+
+    // Configura UART a 9600 baud rate
+    uint16_t ubrr = 103;
+    UBRR0H = (unsigned char)(ubrr >> 8);
+    UBRR0L = (unsigned char)ubrr;
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+
+    // Configura os LEDs como SAÍDA (PD3, PD4, PD5 e PD7)
+    DDRD |= MASCARA_LEDS;
+    PORTD &= ~MASCARA_LEDS; // Garante que começam apagados
+
+    // Configura Botão CONFIRMA (Pino Digital 2 / PD2 / INT0) como ENTRADA com Pull-up
+    clr_bit(DDRD, PD2);
+    set_bit(PORTD, PD2);
+
+    // Configura INT0 para disparar na borda de descida (ISC01 = 1, ISC00 = 0)
+    set_bit(EICRA, ISC01);
+    clr_bit(EICRA, ISC00);
+    set_bit(EIFR, INTF0);   // Limpa flag pendente de interrupção
+    set_bit(EIMSK, INT0);   // Habilita a interrupção externa INT0
+    
+    // Configura Entradas Analógicas (A1 e A2) como ENTRADA e liga Pull-up
+    DDRC &= ~((1 << PC1) | (1 << PC2));
+    PORTC |= (1 << PC1) | (1 << PC2);
+
+    // Configura Entradas Digitais (Pinos 10 e 11) como ENTRADA e liga Pull-up
+    DDRB &= ~((1 << PB2) | (1 << PB3));
+    PORTB |= (1 << PB2) | (1 << PB3);
+
+    sei(); // Religa interrupções
+}
+
+void setup() {
+    setup_hardware();
+    uart_print("--- Escape Room: Minigame Leds ---\n");
+    mostrar_tempo_restante(0);
+    uart_print("\n");
+    estado_atual = LEDS;
+}
+
+void loop() {
+    uint32_t tempo_atual = meu_millis();
+
+    // VERIFICA SE O TEMPO ACABOU
+    if (tempo_atual >= tempo_total && estado_atual != DERROTA) {
+        estado_atual = DERROTA;
+        uart_print("\n--- O TEMPO ACABOU! FIM DE JOGO ---\n");
+        PORTD &= ~MASCARA_LEDS;
+    }
+
+    switch (estado_atual) {
+        case MENU:
+            break;
+            
+        case LEDS:
+            switch (estado_leds) {
+                
+                case ESPERAR_PROXIMO_ROUND: {
+                    if (tempo_atual - tempo_led_anterior >= 1500) {
+                        estado_leds = GERAR_SEQ;
+                    }
+                    break;
+                }
+
+                case GERAR_SEQ: {
+                    uint8_t qtd_leds = round_atual + 1;
+                    for (uint8_t i = 0; i < qtd_leds; i++) {
+                        sequencia[i] = rand() % 4;
+                    }
+                    passo_seq = 0;
+                    led_aceso = false;
+                    tempo_led_anterior = tempo_atual;
+                    estado_leds = MOSTRAR_SEQ;
+                    
+                    uart_print("--- ROUND ");
+                    uart_print_char('0' + round_atual);
+                    uart_print(" ---\nAtencao! Mostrando sequencia...\n");
+                    break;
+                }
+                
+                case MOSTRAR_SEQ: {
+                    uint8_t pino_led_atual = pinos_leds[sequencia[passo_seq]];
+                    if (!led_aceso) {
+                        if (tempo_atual - tempo_led_anterior >= 400) {
+                            set_bit(PORTD, pino_led_atual);
+                            led_aceso = true;
+                            tempo_led_anterior = tempo_atual;
+                        }
+                    } else {
+                        if (tempo_atual - tempo_led_anterior >= 600) {
+                            clr_bit(PORTD, pino_led_atual);
+                            led_aceso = false;
+                            tempo_led_anterior = tempo_atual;
+                            passo_seq++;
+                            
+                            if (passo_seq >= (round_atual + 1)) {
+                                passo_jogador = 0;
+                                confirma_pressionado = false; // Limpa cliques anteriores
+                                estado_botoes_anterior = ler_estado_botoes(); 
+                                estado_leds = ESPERAR_JOGADOR;
+                                uart_print("Sua vez! Repita a sequencia e aperte CONFIRMA (Pino 2).\n");
+                            }
+                        }
+                    }
+                    break;
+                }
+                
+                case ESPERAR_JOGADOR: {
+                    uint8_t qtd_leds = round_atual + 1;
+                    int8_t botao_pressionado = -1;
+                    uint8_t leituras_atuais = ler_estado_botoes(); 
+                    static uint32_t tempo_ultimo_clique[4] = {0, 0, 0, 0}; 
+                    
+                    // 1. Leitura dos 4 botões de cores
+                    for (int i = 0; i < 4; i++) {
+                        bool agora_pressionado = tst_bit(leituras_atuais, i);
+                        bool antes_pressionado = tst_bit(estado_botoes_anterior, i);
+                        
+                        if (agora_pressionado && !antes_pressionado) {
+                            if (tempo_atual - tempo_ultimo_clique[i] > 150) {
+                                botao_pressionado = i;
+                                set_bit(PORTD, pinos_leds[i]); // Feedback visual
+                                tempo_ultimo_clique[i] = tempo_atual;
+                            }
+                        } else if (!agora_pressionado && antes_pressionado) {
+                            clr_bit(PORTD, pinos_leds[i]); // Apaga ao soltar
+                            tempo_ultimo_clique[i] = tempo_atual;
+                        }
+                    }
+                    
+                    estado_botoes_anterior = leituras_atuais;
+                    
+                    // Registra a cor escolhida sem validar ainda
+                    if (botao_pressionado != -1) {
+                        if (passo_jogador < qtd_leds) {
+                            const char* nomes_cores[4] = {"VERMELHO", "AMARELO", "VERDE", "AZUL"};
+                            
+                            resposta_jogador[passo_jogador] = botao_pressionado;
+                            passo_jogador++;
+                            
+                            uart_print("-> Registrado (");
+                            uart_print_char('0' + passo_jogador);
+                            uart_print("/");
+                            uart_print_char('0' + qtd_leds);
+                            uart_print("): ");
+                            uart_print(nomes_cores[botao_pressionado]);
+                            uart_print("\n");
+                            
+                            if (passo_jogador == qtd_leds) {
+                                uart_print("Sequencia preenchida! Aperte CONFIRMA para validar.\n");
+                            }
+                        } else {
+                            uart_print("Limite atingido! Aperte CONFIRMA para validar.\n");
+                        }
+                    }
+
+                    // 2. Validação disparada pela interrupção INT0 (Botão CONFIRMA)
+                    if (confirma_pressionado) {
+                        confirma_pressionado = false; // Consome a flag
+                        PORTD &= ~MASCARA_LEDS;       // Apaga os LEDs
+
+                        // Verifica se digitou a quantidade certa e se cada cor bate
+                        bool acertou = (passo_jogador == qtd_leds);
+                        if (acertou) {
+                            for (uint8_t i = 0; i < qtd_leds; i++) {
+                                if (resposta_jogador[i] != sequencia[i]) {
+                                    acertou = false;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (acertou) {
+                            uart_print("ACERTOU a sequencia!\n");
+                            round_atual++;
+                            
+                            if (round_atual > 4) {
+                                uart_print("\nMini-game concluido!\nDica desbloqueada: Foi encontrado um OCULOS e um OBJETO PONTIAGUDO na cena do crime\n\n");
+                                mostrar_tempo_restante(tempo_atual);
+                                estado_atual = MORSE;
+                            } else {
+                                uart_print("\nRound concluido!\n");
+                                tempo_led_anterior = tempo_atual; 
+                                estado_leds = ESPERAR_PROXIMO_ROUND;
+                            }
+                        } else {
+                            erros++;
+                            penalidade_acumulada += 30000;
+                            
+                            if (tempo_total >= 30000) {
+                                tempo_total -= 30000;
+                            } else {
+                                tempo_total = 0;
+                            }
+                            
+                            uart_print("ERROU a sequencia! Penalidade de 30s aplicada. Voltando para o Round 1...\n");
+                            mostrar_tempo_restante(tempo_atual);
+                            uart_print("\n");
+                            
+                            round_atual = 1;
+                            tempo_led_anterior = tempo_atual; 
+                            estado_leds = ESPERAR_PROXIMO_ROUND;
+                        }
+                    }
+                    break;
+                }
+            }
+            break;
+            
+        case MORSE:
+            // Lógica do próximo minigame
+            break;
+            
+        case DERROTA:
+            // Jogo travado em derrota
+            break;
+    }
+}
